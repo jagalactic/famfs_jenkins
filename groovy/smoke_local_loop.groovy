@@ -1,0 +1,11 @@
+node('server') {
+    // Clone the repo that contains all_coverage.groovy
+    git url: 'git@github.com:jagalactic/famfs_jenkins.git'
+
+    // Now the file should exist in the workspace
+    def coverageScript = load 'groovy/smoke.groovy'
+
+    // Call with arguments
+    coverageScript.call(repoUrl: '/home/jenkins/git/famfs',
+			repo_branch: 'master')
+}

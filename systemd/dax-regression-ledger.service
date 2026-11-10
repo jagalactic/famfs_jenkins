@@ -1,0 +1,18 @@
+[Unit]
+# Collect ndctl_regression_public build results into the durable JSONL ledger
+# (~jmg/.dax-regression-ledger/ledger.jsonl) and render the kernel x ndctl
+# dashboard to Jenkins userContent. Controller-side, like ndctl-regression-watch;
+# reads the API token from ./api-key.md and publishes the HTML over ssh + sudo.
+# Paired with dax-regression-ledger.timer.
+Description=Collect dax regression results + render dashboard
+After=network-online.target
+Wants=network-online.target
+OnFailure=status-email@%n.service
+
+[Service]
+Type=oneshot
+User=jmg
+WorkingDirectory=/home/jmg/w/famfs_jenkins
+# Override JOB / LEDGER_DIR / UC_HOST / UC_FILE with Environment= if needed.
+ExecStart=/home/jmg/w/famfs_jenkins/scripts/dax-regression-ledger
+TimeoutStartSec=600

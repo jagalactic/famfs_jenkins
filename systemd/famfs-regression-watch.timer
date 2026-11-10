@@ -1,0 +1,19 @@
+[Unit]
+Description=Periodically watch kernel/famfs repos for famfs_regression_public
+# Pairs with famfs-regression-watch.service.
+
+[Timer]
+# Cadence. Nightly by design: Miklos' PR tag, then mainline master, until v7.4
+# tags exist; after that, daily catches new tags within a day. Every firing
+# dispatches at least one kernel build (incremental on the persistent tree),
+# so a heavier cadence means more kernel builds. Fires after
+# ndctl-regression-watch (04:00) so the two run_qemu jobs queue on thing1
+# rather than race for it.
+OnCalendar=*-*-* 04:30:00
+# Randomize a little so it doesn't fire exactly on the hour with everything else.
+RandomizedDelaySec=900
+# If the machine was off at 04:30, run once it next boots (don't skip the day).
+Persistent=true
+
+[Install]
+WantedBy=timers.target

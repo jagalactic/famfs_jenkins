@@ -1,0 +1,21 @@
+#!/bin/bash
+# systemd-status-email <unit> - mail the status + journal tail of a failed unit.
+# Used as OnFailure=status-email@%n.service by the CI timers' services, so a
+# failing watcher/mirror/ledger/watchdog run is reported instead of silently
+# skipped. Mails via the local msmtp (sendmail -t, ~/.config/msmtp/config).
+set -u
+UNIT="${1:?unit}"
+# Recipient: $STATUS_EMAIL_TO, else NOTIFY_EMAIL from ../site.conf (gitignored;
+# see site.conf.example).
+SITE_CONF="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)/../site.conf"
+TO="${STATUS_EMAIL_TO:-}"
+if [[ -z "$TO" && -f "$SITE_CONF" ]]; then
+  TO="$(sed -n 's/^NOTIFY_EMAIL=//p' "$SITE_CONF" | tail -1 | tr -d "\"' \t\r")"
+fi
+[[ -n "$TO" ]] || { echo "systemd-status-email: no recipient (set NOTIFY_EMAIL in site.conf)" >&2; exit 2; }
+{
+  printf 'To: %s\nSubject: [systemd] %s FAILED on %s\nContent-Type: text/plain; charset=us-ascii\n\n' "$TO" "$UNIT" "$(hostname)"
+  systemctl status --no-pager -l "$UNIT" 2>&1 | head -30
+  echo; echo "--- journal (last 60 lines) ---"
+  journalctl -u "$UNIT" -n 60 --no-pager 2>&1
+} | /usr/sbin/sendmail -t

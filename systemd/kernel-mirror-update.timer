@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily refresh of the local kernel mirror (thing1)
+# Pairs with kernel-mirror-update.service.
+
+[Timer]
+# 03:00 - about an hour before ndctl-regression-watch.timer (04:00), so a new
+# upstream tag is in the mirror before the watcher dispatches a build for it
+# (the fixture also has a public fallback if the mirror is momentarily behind).
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=600
+# If the machine was off at 03:00, run once it next boots.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

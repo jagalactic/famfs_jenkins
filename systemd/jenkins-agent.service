@@ -1,0 +1,19 @@
+[Unit]
+Description=Jenkins inbound agent (thing1, run_qemu)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=jenkins
+Group=jenkins
+WorkingDirectory=/home/jenkins/thing1
+ExecStart=/usr/bin/java -jar /home/jenkins/agent.jar \
+    -url http://jenkins-server:8080/ \
+    -secret @/home/jenkins/secret-thing1 \
+    -name thing1 \
+    -workDir /home/jenkins/thing1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

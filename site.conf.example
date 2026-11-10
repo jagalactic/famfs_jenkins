@@ -1,0 +1,6 @@
+# Site-specific settings. Copy to site.conf (gitignored) and edit.
+# Plain KEY=value lines; read by scripts/create-job.sh, scripts/jenkins-watchdog
+# and scripts/systemd-status-email.
+
+# Where CI result mail, watchdog reports and failed-unit mail are sent.
+NOTIFY_EMAIL=ci-admin@example.com

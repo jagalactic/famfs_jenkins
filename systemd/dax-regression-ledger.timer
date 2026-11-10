@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly dax-regression-ledger collection + dashboard refresh
+# Pairs with dax-regression-ledger.service.
+
+[Timer]
+# Hourly: collects completed builds well before they age out of Jenkins'
+# retention (so the ledger outlives pruning) and keeps the dashboard fresh.
+OnCalendar=hourly
+RandomizedDelaySec=300
+# Catch up once on boot if a run was missed.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

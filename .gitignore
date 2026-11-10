@@ -1,0 +1,10 @@
+*~
+*.log
+
+# Jenkins API token — must not be committed
+api-key.md
+
+# Site-specific settings (notification address, ...); see site.conf.example
+site.conf
+
+__pycache__/

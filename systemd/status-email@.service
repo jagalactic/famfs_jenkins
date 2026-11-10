@@ -1,0 +1,10 @@
+[Unit]
+# Mails the status + journal tail of a failed unit. Attach to a service with
+#   OnFailure=status-email@%n.service
+# Runs as jmg so it can use ~jmg/.config/msmtp/config (sendmail -> msmtp).
+Description=Mail failure report for %i
+
+[Service]
+Type=oneshot
+User=jmg
+ExecStart=/home/jmg/w/famfs_jenkins/scripts/systemd-status-email %i

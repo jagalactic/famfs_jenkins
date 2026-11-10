@@ -1,0 +1,19 @@
+[Unit]
+# Refresh the local bare kernel mirror on thing1 that ndctl_regression_public
+# hardlink-clones from (run_qemu_fixture kernelMirror). Runs the git fetch over
+# ssh, so this is a controller-side unit like ndctl-regression-watch. Paired
+# with kernel-mirror-update.timer; scheduled ~1h before the watcher so new tags
+# are mirrored before the watcher dispatches builds for them.
+Description=Refresh the local kernel mirror (thing1) for ndctl_regression_public
+After=network-online.target
+Wants=network-online.target
+OnFailure=status-email@%n.service
+
+[Service]
+Type=oneshot
+User=jmg
+WorkingDirectory=/home/jmg/w/famfs_jenkins
+# Override MIRROR / MIRROR_HOST here if the mirror moves.
+ExecStart=/home/jmg/w/famfs_jenkins/scripts/update-kernel-mirror.sh
+# Full 'remote update' of the kernel tree can take a while on a big day.
+TimeoutStartSec=3600

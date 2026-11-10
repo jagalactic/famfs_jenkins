@@ -1,0 +1,30 @@
+
+* Nodes
+| Node               | old name | Tags      | kernel                            | kernel branch |
+|--------------------+----------+-----------+-----------------------------------+---------------|
+| jenkins-kernel43-0 | jslave0  | kernel43  | 6.11.0-rc4+                       |               |
+| jenkins-kernel43-1 | jslave1  | kernel43  | 6.11.0-rc4+                       |               |
+| jenkins-kernel42-0 | jslave2  | kernel42  | 6.9.0-rc5+                        |               |
+| jenkins-dualv1-0   | jslave3  | fuse_dual | 6.14.0+                           | famfs_fuse_v1 |
+| jenkins-fusev1-0   | jslave4  | fuse      | 6.14.0+                           | famfs_fuse_v1 |
+| jenkins-dualv2-0   | jslave5  | dual_v2   | 6.14.11-famfs_dualv2+             |               |
+| jenkins-fusev2-0   | jslave6  | fuse_v2   | 6.14.11-famfs_dualv2+             |               |
+| jenkins-dualv2-1   | jslave7  | dual_v2   | 6.14.11-famfs_fusev2+             |               |
+| jenkins-fusev3-0   | jslave8  | fuse_v3   | 6.14.11-famfs_fusev3-9ec0dce5faf4 |               |
+| jenkins-dualv3-0   | jslave9  | dual_v3   | 6.14.11-famfs_dualv3-8eed96d91fe7 |               |
+| jenkins-dualv3-1   | jslave10 | dual_v3   | 6.14.11-famfs_dualv3-8eed96d91fe7 |               |
+
+| jenkins-standalone |          |           |                                   |               |
+
+* Jenkins Jobs
+
+| coverage-local      | Coverage test on jmg's local repo, all environments |
+| coverage-jagalactic | Coverage on jagalactic/famfs.git, all env           |
+| coverage-public     | Coverage on public repo, all env                    |
+| smoke-local         |                                                     |
+| smoke-jagalactic    |                                                     |
+| smoke-public        |                                                     |
+| valgrind-local      |                                                     |
+| valgrind-jagalactic |                                                     |
+| valgrind-public     |                                                     |
+|                     |                                                     |

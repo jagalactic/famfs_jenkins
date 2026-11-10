@@ -1,0 +1,20 @@
+[Unit]
+Description=Periodically watch kernel/ndctl repos for ndctl_regression_public
+# Pairs with ndctl-regression-watch.service.
+
+[Timer]
+# Cadence. Kernel -rc tags land ~weekly and stable releases less often, so daily
+# catches new tags within a day. NOTE: with WATCH_TIPS=1 (the script default) a
+# kernel-master/ndctl-main tip build is dispatched whenever a watched tip has
+# moved since the last run - i.e. potentially once per firing - so a heavier
+# cadence means more full kernel builds. To poll more often, change to e.g.
+# OnCalendar=*-*-* 00/6:00:00 (every 6h); to reduce tip churn set WATCH_TIPS=0
+# in the .service. Adjust to taste, then daemon-reload.
+OnCalendar=*-*-* 04:00:00
+# Randomize a little so it doesn't fire exactly on the hour with everything else.
+RandomizedDelaySec=900
+# If the machine was off at 04:00, run once it next boots (don't skip the day).
+Persistent=true
+
+[Install]
+WantedBy=timers.target

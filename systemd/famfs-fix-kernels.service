@@ -1,0 +1,20 @@
+[Unit]
+# Re-pin and reboot any Jenkins agent that came up on the wrong kernel
+# (e.g. after a power outage that also rebooted this host). Runs once at boot.
+Description=Ensure Jenkins agent VMs are on their expected kernels
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jmg
+WorkingDirectory=/home/jmg/w/famfs_jenkins
+# Agents may still be booting when this fires; the script polls each one for
+# up to REACH_TIMEOUT seconds before giving up, so exact ordering is not needed.
+ExecStart=/home/jmg/w/famfs_jenkins/scripts/fix_kernels.sh
+# Don't fail the boot if an agent can't be remediated; it's logged to journal.
+SuccessExitStatus=0 1
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

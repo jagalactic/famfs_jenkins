@@ -1,0 +1,20 @@
+[Unit]
+# Daily CI health check: did every expected Jenkins job run, is any agent
+# offline, is the queue stuck, is the controller disk filling, are the local
+# timers healthy. Mails a report only when something is wrong (plus a Monday
+# "all OK" heartbeat so a dead watchdog is noticed). Paired with
+# jenkins-watchdog.timer. See scripts/jenkins-watchdog.
+Description=Jenkins CI watchdog (jobs ran, agents online, disk, timers)
+After=network-online.target
+Wants=network-online.target
+OnFailure=status-email@%n.service
+
+[Service]
+Type=oneshot
+User=jmg
+WorkingDirectory=/home/jmg/w/famfs_jenkins
+ExecStart=/home/jmg/w/famfs_jenkins/scripts/jenkins-watchdog
+# Exit 1 just means "problems found and mailed"; only exit 2 (could not run
+# the checks at all) should count as a unit failure.
+SuccessExitStatus=1
+TimeoutStartSec=300

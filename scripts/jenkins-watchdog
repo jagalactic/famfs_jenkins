@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""jenkins-watchdog - notice when the CI goes quiet.
+
+Jenkins only emails when a build FAILS; a job that silently stops being
+scheduled, an agent that drops off, a stuck queue, or a full controller disk
+produce no mail at all (Sep/Oct 2026: every nightly *_local job lost its
+trigger on a re-register, and thing1 was offline for 4 days -- nobody noticed
+for a month). This script runs from a systemd timer on thing1 (independent of
+Jenkins) and mails a problem report via the local msmtp (sendmail -t).
+
+Checks:
+  - controller reachable via the API
+  - every expected job ran within its max age, its last result is not
+    FAILURE, and its config still carries a trigger (<spec>)
+  - no agent is offline unless someone marked it temporarily offline
+  - nothing has sat in the build queue longer than QUEUE_MAX_HOURS
+  - controller root fs below DISK_MAX_PCT (via ssh)
+  - local units: jenkins-agent.service active; the regression timers enabled
+    and their last run successful
+
+Usage:  jenkins-watchdog [-n] [-v] [--mail-test]
+  -n           print the report, never mail
+  -v           print the report even when mailing
+  --mail-test  mail the report even if there are no problems
+Env:    JENKINS_URL, JENKINS_USER, WATCHDOG_MAIL_TO (default: NOTIFY_EMAIL
+        from ../site.conf), WATCHDOG_HEARTBEAT_DOW
+        (day name, e.g. Mon: mail an "all OK" summary that day so a dead
+        watchdog is itself noticed; default Mon; empty = never),
+        WATCHDOG_IGNORE_NODES (space-separated agents to ignore).
+Exit:   0 all good, 1 problems found, 2 could not even run the checks.
+"""
+import base64, datetime, json, os, re, subprocess, sys, urllib.request, urllib.error
+
+# ---- config -----------------------------------------------------------------
+HERE = os.path.dirname(os.path.abspath(__file__))
+JENKINS_URL = os.environ.get("JENKINS_URL", "http://jenkins-server:8080").rstrip("/")
+JUSER = os.environ.get("JENKINS_USER", "jmg")
+def site_conf(key):
+    """KEY=value from ../site.conf (gitignored; see site.conf.example), or ''."""
+    try:
+        for line in open(os.path.join(HERE, "..", "site.conf")):
+            k, sep, v = line.partition("=")
+            if sep and k.strip() == key:
+                return v.strip().strip("\"'")
+    except OSError:
+        pass
+    return ""
+MAIL_TO = os.environ.get("WATCHDOG_MAIL_TO") or site_conf("NOTIFY_EMAIL")
+HEARTBEAT_DOW = os.environ.get("WATCHDOG_HEARTBEAT_DOW", "Mon")
+IGNORE_NODES = set(os.environ.get("WATCHDOG_IGNORE_NODES", "").split())
+CONTROLLER_SSH = "10.1.3.10"
+DISK_MAX_PCT = 85
+QUEUE_MAX_HOURS = 6
+
+# job -> (max_hours, needs_trigger)
+#   max_hours:     alert if the last build started more than this long ago
+#                  (None = never; for poll-only jobs that build only on change)
+#   needs_trigger: alert if the job config carries no <spec> (cron/pollSCM) --
+#                  False for jobs dispatched externally (the regression watcher)
+# Nightly jobs get 36h so one slow night does not page; the watcher-dispatched
+# regression job gets 48h (it runs when an upstream tip moves, ~daily).
+EXPECTED_JOBS = {
+    "sanitize_local":          (36, True),
+    "smoke_local":             (36, True),
+    "valgrind_local":          (36, True),
+    "coverage_jagalactic":     (36, True),
+    "public-master-k42":       (36, True),
+    "public-master-k43":       (36, True),
+    "public-coverage-k42":     (36, True),
+    "public-coverage-k43":     (36, True),
+    # pollSCM-only: build only when famfs master moves
+    "jg-master-k43-valgrind":  (None, True),
+    "jg-master-dual-valgrind": (None, True),
+    "jg-master-fuse-valgrind": (None, True),
+    # dispatched by ndctl-regression-watch.timer on thing1, no Jenkins trigger
+    "ndctl_regression_public": (48, False),
+    # dispatched by famfs-regression-watch.timer on thing1, no Jenkins trigger
+    "famfs_regression_public": (48, False),
+}
+# local (thing1) units that must be healthy
+LOCAL_SERVICES = ["jenkins-agent.service"]
+LOCAL_TIMERS = ["kernel-mirror-update.timer", "ndctl-regression-watch.timer",
+                "famfs-regression-watch.timer",
+                "dax-regression-ledger.timer", "jenkins-watchdog.timer"]
+# ----------------------------------------------------------------------------
+
+problems, notes = [], []
+def bad(s): problems.append(s)
+def ok(s): notes.append(s)
+
+def token():
+    try:
+        return open(os.path.join(HERE, "..", "api-key.md")).read().strip()
+    except OSError as e:
+        sys.exit("no API token: %s" % e)
+
+def api(path, tree=None):
+    url = JENKINS_URL + path + "/api/json" + ("?tree=" + tree if tree else "")
+    req = urllib.request.Request(url)
+    req.add_header("Authorization", "Basic " + base64.b64encode(("%s:%s" % (JUSER, TOKEN)).encode()).decode())
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+def get(path):
+    req = urllib.request.Request(JENKINS_URL + path)
+    req.add_header("Authorization", "Basic " + base64.b64encode(("%s:%s" % (JUSER, TOKEN)).encode()).decode())
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode()
+
+def sh(*cmd, timeout=30):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except Exception as e:
+        return 99, str(e)
+
+def hours_ago(ms):
+    return (datetime.datetime.now() - datetime.datetime.fromtimestamp(ms / 1000)).total_seconds() / 3600
+
+def check_jenkins():
+    try:
+        jobs = {j["name"]: j for j in api("", "jobs[name,color,lastBuild[number,timestamp,result,building]]")["jobs"]}
+    except Exception as e:
+        bad("controller %s unreachable: %s" % (JENKINS_URL, e))
+        return
+    ok("controller reachable, %d jobs" % len(jobs))
+    for name, (max_h, needs_trigger) in EXPECTED_JOBS.items():
+        j = jobs.get(name)
+        if not j:
+            bad("job %s: missing" % name); continue
+        if j.get("color", "").startswith("disabled"):
+            bad("job %s: disabled" % name); continue
+        lb = j.get("lastBuild")
+        if not lb:
+            bad("job %s: never built" % name); continue
+        age = hours_ago(lb["timestamp"])
+        if max_h is not None and age > max_h:
+            bad("job %s: last build #%d was %.0fh ago (max %dh)" % (name, lb["number"], age, max_h))
+        elif not lb.get("building") and lb.get("result") == "FAILURE":
+            bad("job %s: last build #%d FAILURE" % (name, lb["number"]))
+        if not needs_trigger:
+            continue
+        try:
+            cfg = get("/job/%s/config.xml" % name)
+            if not re.search(r"<spec>[^<]+</spec>", cfg):
+                bad("job %s: NO TRIGGER in config (re-registered without one?)" % name)
+        except Exception as e:
+            bad("job %s: cannot read config.xml: %s" % (name, e))
+    # agents
+    try:
+        for c in api("/computer", "computer[displayName,offline,temporarilyOffline,offlineCauseReason]")["computer"]:
+            n = c["displayName"]
+            if c["offline"] and not c["temporarilyOffline"] and n not in IGNORE_NODES:
+                bad("agent %s: offline %s" % (n, c.get("offlineCauseReason") or "(no cause)"))
+    except Exception as e:
+        bad("cannot list agents: %s" % e)
+    # queue
+    try:
+        for i in api("/queue", "items[task[name],why,inQueueSince]")["items"]:
+            h = hours_ago(i["inQueueSince"])
+            if h > QUEUE_MAX_HOURS:
+                bad("queue: %s waiting %.0fh: %s" % (i["task"].get("name"), h, i.get("why")))
+    except Exception as e:
+        bad("cannot read queue: %s" % e)
+
+def check_controller_disk():
+    rc, out = sh("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", CONTROLLER_SSH, "df --output=pcent /")
+    if rc:
+        bad("controller disk: ssh failed: %s" % out.splitlines()[-1:]); return
+    pct = int(out.split()[-1].rstrip("%"))
+    (bad if pct > DISK_MAX_PCT else ok)("controller root fs %d%% full%s" % (pct, " (limit %d%%)" % DISK_MAX_PCT if pct > DISK_MAX_PCT else ""))
+
+def check_local_units():
+    for u in LOCAL_SERVICES:
+        rc, out = sh("systemctl", "is-active", u)
+        (ok if out == "active" else bad)("%s: %s" % (u, out))
+    for t in LOCAL_TIMERS:
+        rc, en = sh("systemctl", "is-enabled", t)
+        rc, act = sh("systemctl", "is-active", t)
+        if en != "enabled" or act != "active":
+            bad("%s: %s/%s" % (t, en, act)); continue
+        svc = t[:-len(".timer")] + ".service"
+        rc, res = sh("systemctl", "show", "-p", "Result", "--value", svc)
+        if res not in ("success", ""):
+            bad("%s: last run result %s" % (svc, res))
+        else:
+            ok("%s enabled, last %s ok" % (t, svc))
+
+def send_mail(subject, body):
+    if not MAIL_TO:
+        sys.stderr.write("no recipient: set NOTIFY_EMAIL in site.conf (or WATCHDOG_MAIL_TO)\n")
+        return False
+    msg = "To: %s\nSubject: %s\nContent-Type: text/plain; charset=us-ascii\n\n%s\n" % (MAIL_TO, subject, body)
+    p = subprocess.run(["/usr/sbin/sendmail", "-t"], input=msg, text=True, capture_output=True, timeout=60)
+    if p.returncode:
+        sys.stderr.write("sendmail failed: %s\n" % (p.stdout + p.stderr))
+        return False
+    return True
+
+def main():
+    global TOKEN
+    args = sys.argv[1:]
+    dry = "-n" in args; verbose = "-v" in args or dry; mail_test = "--mail-test" in args
+    TOKEN = token()
+    check_jenkins(); check_controller_disk(); check_local_units()
+    host = os.uname().nodename
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    if problems:
+        subject = "[jenkins-watchdog] %d problem(s) on %s" % (len(problems), now)
+    else:
+        subject = "[jenkins-watchdog] all OK %s" % now
+    body = "\n".join(["jenkins-watchdog on %s, %s" % (host, now), "", "PROBLEMS:"] +
+                     (["  - " + p for p in problems] or ["  (none)"]) +
+                     ["", "OK:"] + ["  - " + n for n in notes] +
+                     ["", "Dashboard: %s/userContent/dax-regression-ledger.html" % JENKINS_URL,
+                      "Script: %s" % os.path.abspath(__file__)])
+    if verbose:
+        print(subject); print(body)
+    heartbeat = HEARTBEAT_DOW and datetime.datetime.now().strftime("%a") == HEARTBEAT_DOW
+    if not dry and (problems or heartbeat or mail_test):
+        if send_mail(subject, body) and not verbose:
+            print("mailed %s: %s" % (MAIL_TO, subject))
+    return 1 if problems else 0
+
+if __name__ == "__main__":
+    sys.exit(main())

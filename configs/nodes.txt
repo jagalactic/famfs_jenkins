@@ -1,0 +1,16 @@
+jenkins-server
+jenkins-kernel43-0
+jenkins-kernel43-1
+jenkins-kernel42-0
+jenkins-dualv1-0
+jenkins-dualv1-1
+jenkins-dualv2-0
+jenkins-dualv2-1
+jenkins-fusev1-0
+jenkins-fusev2-0
+jenkins-fusev3-0
+jenkins-dualv3-0
+jenkins-dualv3-1
+jenkins-fusev4-0
+jenkins-fuse-extmap0
+jenkins-fuse-extmap1

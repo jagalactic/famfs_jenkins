@@ -1,0 +1,53 @@
+# ndctl_regression.fragment
+#
+# CONFIG_* the ndctl test suite + run_qemu's nfit_test/cxl_test backends need,
+# merged (by run_qemu_fixture's config-fragment path) onto a run_qemu-compatible
+# base config (configs/famfs_qemu_ndctl.config) when building an ARBITRARY
+# mainline kernel. The base carries the run_qemu boot/rootfs bits; this fragment
+# forces the nvdimm / dax / cxl infra back on in case `make olddefconfig` for a
+# different kernel would drop or default them off. Modules (=m) where the test
+# infra (tools/testing/nvdimm, tools/testing/cxl) overrides them at runtime.
+#
+# Derived from the symbols in famfs_qemu_ndctl.config. Not famfs-specific (no
+# fs/famfs, no fsdev_dax) - this is the upstream ndctl suite payload.
+#
+# NOTE: this set is a best-effort starting point and will likely need tuning on
+# the first real build against mainline; run_qemu_fixture asserts a critical
+# subset (see assertConfig in ndctl_regression_public.groovy) so a dropped
+# symbol fails the build loudly instead of silently mis-testing.
+
+# --- memory / zone-device (backing for pmem/dax) ---
+CONFIG_ZONE_DEVICE=y
+CONFIG_MEMORY_HOTPLUG=y
+CONFIG_TRANSPARENT_HUGEPAGE=y
+
+# --- libnvdimm / nfit (nfit_test backend) ---
+CONFIG_LIBNVDIMM=m
+CONFIG_BLK_DEV_PMEM=m
+CONFIG_ND_BTT=m
+CONFIG_ND_PFN=m
+CONFIG_ND_CLAIM=y
+CONFIG_NVDIMM_PFN=y
+CONFIG_NVDIMM_DAX=y
+CONFIG_ACPI_NFIT=m
+CONFIG_X86_PMEM_LEGACY=m
+
+# --- device-dax / fs-dax ---
+CONFIG_DAX=y
+CONFIG_DEV_DAX=m
+CONFIG_DEV_DAX_PMEM=m
+CONFIG_DEV_DAX_KMEM=m
+CONFIG_DEV_DAX_HMEM=m
+CONFIG_DEV_DAX_HMEM_DEVICES=y
+CONFIG_DEV_DAX_CXL=m
+CONFIG_FS_DAX=y
+
+# --- cxl (cxl_test backend) ---
+CONFIG_CXL_BUS=m
+CONFIG_CXL_PCI=m
+CONFIG_CXL_ACPI=m
+CONFIG_CXL_MEM=m
+CONFIG_CXL_PMEM=m
+CONFIG_CXL_PORT=m
+CONFIG_CXL_REGION=y
+CONFIG_CXL_MEM_RAW_COMMANDS=y

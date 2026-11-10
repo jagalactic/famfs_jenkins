@@ -1,0 +1,26 @@
+[Unit]
+# Poll the kernel + ndctl repos for new tags / tip movement and dispatch the
+# ndctl_regression_public Jenkins job for each new ref. Idempotent: dedup state
+# lives in ~jmg/.ndctl-regression-watch, and the first run just baselines (no
+# dispatch), so it is safe to run on a timer. Paired with
+# ndctl-regression-watch.timer; not enabled directly.
+Description=Watch kernel/ndctl repos and dispatch ndctl_regression_public
+After=network-online.target
+Wants=network-online.target
+OnFailure=status-email@%n.service
+
+[Service]
+Type=oneshot
+User=jmg
+WorkingDirectory=/home/jmg/w/famfs_jenkins
+# Reads the Jenkins API token from ./api-key.md and POSTs buildWithParameters to
+# http://jenkins-server:8080. Policy (repos, version floors, watched branches,
+# WATCH_* toggles) lives in the script's config block; override here with
+# Environment= lines if needed, e.g.:
+#   Environment=KERNEL_REPO_BUILD=/home/jenkins/git/linux.git
+#   Environment=WATCH_TIPS=0
+ExecStart=/home/jmg/w/famfs_jenkins/scripts/ndctl-regression-watch.sh
+# ls-remote + a few curl POSTs; should be quick, but allow for slow mirrors.
+TimeoutStartSec=600
+
+# The timer schedules this; no [Install] here (the .timer is what gets enabled).

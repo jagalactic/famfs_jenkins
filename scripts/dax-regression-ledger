@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""dax-regression-ledger - collect ndctl_regression_public results into a durable
+JSONL ledger and render a kernel x ndctl dashboard.
+
+Jenkins prunes old builds (retention ~50), so their tested-refs artifacts vanish.
+This tool upserts each completed build into an append-only ledger (keyed by build
+number) that OUTLIVES pruning, then renders a dashboard from the full ledger:
+  - a kernel x ndctl MATRIX (latest verdict per pair), and
+  - a chronological LOG (every run, with resolved shas so the moving branches
+    pending/master/main are tracked by commit, not just name).
+
+Data per build: displayName -> kernel ref + per-ndctl (ref, verdict); the
+tested-refs.txt artifact -> resolved shas. Runs controller-side on a timer (see
+systemd/dax-regression-ledger.*); reads the Jenkins API token from ./api-key.md.
+
+Usage:  scripts/dax-regression-ledger [-n|--dry-run]
+Env:    JOB, JENKINS_URL, JENKINS_USER, LEDGER_DIR, UC_HOST, UC_FILE
+"""
+import os, sys, re, json, base64, subprocess, datetime, urllib.request, urllib.error
+
+HERE        = os.path.dirname(os.path.abspath(__file__))
+JOB         = os.environ.get("JOB", "ndctl_regression_public")
+JENKINS_URL = os.environ.get("JENKINS_URL", "http://jenkins-server:8080")
+JUSER       = os.environ.get("JENKINS_USER", "jmg")
+LEDGER_DIR  = os.environ.get("LEDGER_DIR", os.path.expanduser("~/.dax-regression-ledger"))
+LEDGER      = os.path.join(LEDGER_DIR, "ledger.jsonl")
+UC_HOST     = os.environ.get("UC_HOST", "10.1.3.10")           # host with Jenkins userContent
+UC_FILE     = os.environ.get("UC_FILE", "/var/lib/jenkins/userContent/dax-regression-ledger.html")
+DRY         = any(a in ("-n", "--dry-run") for a in sys.argv[1:])
+TOKEN       = open(os.path.join(HERE, "..", "api-key.md")).read().strip()
+
+def api(path, raw=False):
+    req = urllib.request.Request(JENKINS_URL + path)
+    req.add_header("Authorization", "Basic " + base64.b64encode(f"{JUSER}:{TOKEN}".encode()).decode())
+    with urllib.request.urlopen(req, timeout=45) as r:
+        data = r.read()
+    return data.decode("utf-8", "replace") if raw else json.loads(data)
+
+def parse_display(dn):
+    """'k:<kernel> [pending:OK v85:FAIL]'  or  'k:<kernel> n:<ndctl>'  or  'k:<kernel>'."""
+    m = re.match(r"k:(\S+)\s+\[(.*)\]", dn)
+    if m:
+        pairs = [t.rsplit(":", 1) for t in m.group(2).split() if ":" in t]
+        return m.group(1), [(r, v) for r, v in pairs], True
+    m = re.match(r"k:(\S+)\s+n:(\S+)", dn)
+    if m:
+        return m.group(1), [(m.group(2), None)], False   # verdict from build result
+    m = re.match(r"k:(\S+)", dn)
+    return (m.group(1) if m else None), [], False
+
+def parse_refs(txt):
+    """tested-refs.txt -> (kernel_sha, {ndctl_ref: sha}, single_sha)."""
+    ksha, nsha, single = "", {}, ""
+    for line in txt.splitlines():
+        for pat in (r"KERNEL_SHA=(\S+)", r"kernel_sha:\s*(\S+)"):
+            m = re.match(pat, line)
+            if m: ksha = m.group(1)
+        m = re.match(r"NDCTL ref=(\S+) sha=(\S+)", line) or re.match(r"ndctl (\S+):\s*(\S+)", line)
+        if m: nsha[m.group(1)] = m.group(2); continue
+        m = re.match(r"ndctl_sha:\s*(\S+)", line)          # old single-ndctl format
+        if m: single = m.group(1)
+    return ksha, nsha, single
+
+# verdict from a whole-build result, for old single-ndctl builds (no per-ref in displayName)
+RESULT_VERDICT = {"SUCCESS": "OK", "UNSTABLE": "FAIL", "FAILURE": "INFRA", "ABORTED": "SKIP"}
+
+def collect():
+    have = {}
+    if os.path.exists(LEDGER):
+        for line in open(LEDGER):
+            line = line.strip()
+            if line:
+                r = json.loads(line); have[r["build"]] = r
+    builds = api(f"/job/{JOB}/api/json?tree=builds[number,result,building,timestamp,url,displayName]{{0,80}}")["builds"]
+    added = []
+    for b in sorted(builds, key=lambda x: x["number"]):
+        num = b["number"]
+        if b.get("building") or b.get("result") in (None, "ABORTED"):
+            continue                                   # not final / aborted -> not a datapoint
+        if num in have:
+            continue                                   # already recorded (immutable once final)
+        kernel, dn_ndctls, per_ref = parse_display(b.get("displayName", ""))
+        if not kernel or kernel.startswith("b4/"):
+            continue                                   # b4-test-patch.sh runs are not public kernels
+        try:
+            ksha, nsha, single = parse_refs(api(f"/job/{JOB}/{num}/artifact/tested-refs.txt", raw=True))
+        except (urllib.error.HTTPError, urllib.error.URLError):
+            ksha, nsha, single = "", {}, ""            # artifact gone / never made
+        ndctls = []
+        for ref, verdict in dn_ndctls:
+            if verdict is None:                        # single/old: verdict from build result
+                verdict = RESULT_VERDICT.get(b["result"], "?")
+            ndctls.append({"ref": ref, "sha": nsha.get(ref, single), "verdict": verdict})
+        rec = {
+            "build":  num,
+            "date":   datetime.datetime.fromtimestamp(b["timestamp"] / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "result": b["result"],
+            "url":    b["url"],
+            "kernel_ref": kernel,
+            "kernel_sha": ksha,
+            "ndctls":  ndctls,
+        }
+        added.append(rec)
+        have[num] = rec
+    return have, added
+
+# ---- rendering ----
+def sort_refs(refs):
+    """branches (non-vN.N) first, then version tags descending."""
+    def key(r):
+        v = re.match(r"v?(\d+)\.(\d+)(?:\.(\d+))?(?:-rc(\d+))?$", r)
+        if not v:  # a branch like master/pending/main -> sort first
+            return (0, r)
+        maj, mn, pt, rc = (int(x) if x else 0 for x in v.groups())
+        rc = rc if rc else 9999                        # release (no rc) sorts after its rcs
+        return (1, -maj, -mn, -pt, -rc)
+    return sorted(set(refs), key=key)
+
+VCLR = {"OK": "#1a7f37", "FAIL": "#cf222e", "INFRA": "#bf8700", "SKIP": "#8250df", "?": "#57606a"}
+
+def render(recs):
+    rows = sorted(recs.values(), key=lambda r: r["build"])
+    kernels = sort_refs(r["kernel_ref"] for r in rows)
+    ndctls  = sort_refs(n["ref"] for r in rows for n in r["ndctls"])
+    # latest verdict per (kernel_ref, ndctl_ref)
+    cell = {}
+    for r in rows:                                     # ascending build -> later overwrites
+        for n in r["ndctls"]:
+            cell[(r["kernel_ref"], n["ref"])] = (n["verdict"], r["build"], r["url"], r["date"], n["sha"])
+    def esc(s): return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    out = []
+    out.append("<!doctype html><meta charset=utf-8><title>dax regression ledger</title>")
+    out.append("<style>body{font:14px system-ui,sans-serif;margin:2rem;color:#1f2328}"
+               "h1{font-size:1.4rem}h2{margin-top:2rem;font-size:1.1rem}"
+               "table{border-collapse:collapse}td,th{border:1px solid #d0d7de;padding:4px 8px;text-align:center}"
+               "th{background:#f6f8fa}td.k{text-align:left;font-family:monospace}"
+               "a{color:inherit;text-decoration:none}.cell{color:#fff;border-radius:3px;padding:2px 6px;font-weight:600}"
+               "small{color:#57606a}code{font-family:monospace}</style>")
+    out.append(f"<h1>dax regression ledger &mdash; {JOB}</h1>")
+    out.append(f"<small>generated {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
+               f"&middot; {len(rows)} builds &middot; latest #{max((r['build'] for r in rows), default=0)}</small>")
+    # matrix
+    out.append("<h2>Coverage matrix (latest result per kernel &times; ndctl)</h2>")
+    out.append("<table><tr><th>kernel &#8595; / ndctl &#8594;</th>" + "".join(f"<th>{esc(n)}</th>" for n in ndctls) + "</tr>")
+    for k in kernels:
+        out.append(f"<tr><td class=k>{esc(k)}</td>")
+        for n in ndctls:
+            c = cell.get((k, n))
+            if not c:
+                out.append("<td><small>&mdash;</small></td>")
+            else:
+                verdict, bnum, url, date, sha = c
+                clr = VCLR.get(verdict, VCLR["?"])
+                out.append(f"<td><a href='{esc(url)}' title='{esc(date)} {esc((sha or '')[:12])}'>"
+                           f"<span class=cell style='background:{clr}'>{esc(verdict)}</span>"
+                           f"<br><small>#{bnum}</small></a></td>")
+        out.append("</tr>")
+    out.append("</table>")
+    out.append("<p><small>OK=suite passed &middot; FAIL=a test failed (UNSTABLE) &middot; "
+               "INFRA=build/boot broke &middot; &mdash;=untested. Cell links to the build; hover for date + sha.</small></p>")
+    # chronological log
+    out.append("<h2>Log (every run, resolved commits)</h2>")
+    out.append("<table><tr><th>#</th><th>date</th><th>kernel</th><th>ndctl (ref @ sha : verdict)</th><th>result</th></tr>")
+    for r in sorted(rows, key=lambda x: -x["build"]):
+        nd = " ".join(f"{esc(n['ref'])}@{esc((n['sha'] or '?')[:7])}:{esc(n['verdict'])}" for n in r["ndctls"])
+        ks = esc((r["kernel_sha"] or "")[:7])
+        out.append(f"<tr><td><a href='{esc(r['url'])}'>{r['build']}</a></td><td><small>{esc(r['date'])}</small></td>"
+                   f"<td class=k>{esc(r['kernel_ref'])}{(' @'+ks) if ks else ''}</td>"
+                   f"<td class=k>{nd}</td><td>{esc(r['result'])}</td></tr>")
+    out.append("</table>")
+    return "\n".join(out)
+
+def main():
+    os.makedirs(LEDGER_DIR, exist_ok=True)
+    have, added = collect()
+    print(f"[dax-regression-ledger] {len(have)} builds in ledger, {len(added)} new"
+          + (" (dry-run)" if DRY else ""))
+    for r in added:
+        print(f"  + #{r['build']} k:{r['kernel_ref']} "
+              + " ".join(f"{n['ref']}:{n['verdict']}" for n in r["ndctls"]))
+    if DRY:
+        return
+    if added:                                          # append only the new records
+        with open(LEDGER, "a") as f:
+            for r in added:
+                f.write(json.dumps(r, separators=(",", ":")) + "\n")
+    html = render(have)
+    subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", UC_HOST,
+                    f"sudo tee {UC_FILE} >/dev/null && sudo chmod 644 {UC_FILE}"],
+                   input=html.encode(), check=True)
+    print(f"[dax-regression-ledger] dashboard -> {JENKINS_URL}/userContent/{os.path.basename(UC_FILE)}")
+
+if __name__ == "__main__":
+    main()
