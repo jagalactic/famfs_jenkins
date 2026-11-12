@@ -2,7 +2,7 @@
 # run_qemu --autorun: famfs smoke (--fuse) + unit tests for ONE OR MORE famfs
 # source trees, on an nfit_test-backed devdax, under a PUBLIC kernel.
 #
-# This is the famfs_regression_public payload: the mashup of
+# This is the famfs_{dbg,rel}_regression_public payload: the mashup of
 # rq-ndctl-autorun.sh (loop over /root/<label> trees injected via run_qemu's
 # guest_srcs=, per-ref result lines) and rq-famfs-smoke-nfit-autorun.sh (carve
 # a 6G devdax off ACPI.NFIT, run_smoke as a non-root user, ctest).
@@ -24,10 +24,18 @@
 #   122  famfs build failed
 #   123  could not set up the nfit devdax (infra; applies to every ref)
 #
+# Build type: each tree carries .famfs-build-type, written on the host by the
+# worker: "debug" (make debug, run_smoke.sh --fuse, ctest in debug/) or
+# "release [<CMAKE_BUILD_TYPE>]" (make release, run_smoke.sh --fuse --release,
+# ctest in release/). famfs' release target passes no CMAKE_BUILD_TYPE, which
+# gives an unoptimized build without NDEBUG; when a type is given it is
+# exported for the build, and cmake (>= 3.22) takes it as the default. No
+# file = debug.
+#
 # libfuse: pinned per job (the worker's LIBFUSE_REF, famfs.extmap for now),
 # NOT chosen from the running kernel. The host checks that ref out in
 # ./libfuse before the copy (run_qemu ships the tree without .git/, so nothing
-# can be switched here) and records it in .libfuse-ref; 'make debug' builds the
+# can be switched here) and records it in .libfuse-ref; the build uses the
 # checkout as is. The kernel's fuse ABI (same kallsyms keys as the Makefile /
 # famfs_get_kernel_fuse_abi()) is only used to report NOSUPPORT.
 #
@@ -126,20 +134,33 @@ for src in "${srcs[@]}"; do
     echo "famfs ${ref}: $(cat .famfs-sha 2>/dev/null || echo '?')"
     echo "libfuse (pinned on the host): $(cat .libfuse-ref 2>/dev/null || echo '?')"
     chmod -R o+rwX "$src"       # let the smoke user use the tree in place
-    if ! make debug; then
+    btype=debug; cmake_bt=""
+    [ -r .famfs-build-type ] && read -r btype cmake_bt < .famfs-build-type
+    case "$btype" in
+        release) bdir=release; smoke_bt="--release" ;;
+        *)       btype=debug; bdir=debug; smoke_bt=""; cmake_bt="" ;;
+    esac
+    echo "famfs build type: ${btype}${cmake_bt:+ (CMAKE_BUILD_TYPE=${cmake_bt})}"
+    rm -rf "$bdir"              # always configure fresh (see CMAKE_BUILD_TYPE below)
+    # env CMAKE_BUILD_TYPE is only a default: it applies because the release
+    # target passes none (and never to 'make debug', which passes its own).
+    if ! ( [ -n "$cmake_bt" ] && export CMAKE_BUILD_TYPE="$cmake_bt"; make "$bdir" ); then
         echo "FAMFS REGRESSION[$ref]: build failed"
         overall=1; echo "RQ_FAMFS_RESULT ref=$ref rc=122"; continue
     fi
-    ./debug/famfs_fused --fuse-abi 2>/dev/null || true
+    # What was really built: cmake's build type and the C flags in effect.
+    echo "FAMFS REGRESSION[$ref]: $(grep -s '^CMAKE_BUILD_TYPE' "$bdir/CMakeCache.txt" || echo 'CMAKE_BUILD_TYPE unset')"
+    grep -hs '^C_FLAGS' "$bdir"/CMakeFiles/*/flags.make | sort -u | head -3
+    "./$bdir/famfs_fused" --fuse-abi 2>/dev/null || true
 
     echo "===RQ_SECTION famfs-${ref}.smoke-fuse==="
-    echo "## ---- famfs ${ref}: smoke --fuse ----"
-    run_smoke_as "$src" --fuse; r=$?; echo "## smoke --fuse rc=$r"; [ "$r" -ne 0 ] && rc=1
+    echo "## ---- famfs ${ref}: smoke --fuse ${smoke_bt} ----"
+    run_smoke_as "$src" --fuse $smoke_bt; r=$?; echo "## smoke --fuse rc=$r"; [ "$r" -ne 0 ] && rc=1
     umount /mnt/famfs 2>/dev/null || true
 
     echo "===RQ_SECTION famfs-${ref}.unit==="
     echo "## ---- famfs ${ref}: unit tests (ctest) ----"
-    ( cd debug && ctest --output-on-failure ); r=$?; echo "## unit rc=$r"; [ "$r" -ne 0 ] && rc=1
+    ( cd "$bdir" && ctest --output-on-failure ); r=$?; echo "## unit rc=$r"; [ "$r" -ne 0 ] && rc=1
 
     [ "$rc" -ne 0 ] && overall=1
     echo "RQ_FAMFS_RESULT ref=$ref rc=$rc"

@@ -1,5 +1,5 @@
 [Unit]
-Description=Periodically watch kernel/famfs repos for famfs_regression_public
+Description=Periodically watch kernel/famfs repos for famfs_{dbg,rel}_regression_public
 # Pairs with famfs-regression-watch.service.
 
 [Timer]

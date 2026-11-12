@@ -1,4 +1,11 @@
-// famfs_regression_public.groovy
+// famfs_regression.groovy
+//
+// Shared implementation of the famfs_{dbg,rel}_regression_public workers.
+// Loaded by the thin entrypoints groovy/famfs_dbg_regression_public.groovy and
+// groovy/famfs_rel_regression_public.groovy, which differ only in buildType:
+//
+//   debug    'make debug'   + run_smoke.sh --fuse           + ctest in debug/
+//   release  'make release' + run_smoke.sh --fuse --release + ctest in release/
 //
 // Parameterized WORKER: build + boot ONE public kernel under run_qemu (nfit_test
 // devdax), then build + smoke-test (--fuse) + unit-test MULTIPLE famfs versions
@@ -19,42 +26,74 @@
 // Miklos' fuse-update-7.4 tag until it is merged, then Linus' master nightly
 // until the first v7.4 tag, then every release/rc/stable tag >= 7.4 plus master
 // as the idle heartbeat. No Jenkins trigger of its own.
+//
+// Call with the entrypoint already inside node('run_qemu') and this repo
+// checked out in the workspace:
+//   buildType: 'debug' | 'release'
+//   notifyTo:  mail recipient
 
-properties([
-    disableConcurrentBuilds(),      // one run_qemu kernel build at a time; no multi-day pileups
-    parameters([
+def call(Map args) {
+    String buildType = args.buildType ?: 'debug'
+    if (!(buildType in ['debug', 'release'])) { error("famfs_regression: bad buildType '${buildType}'") }
+    boolean isRelease = (buildType == 'release')
+    String notifyTo  = args.notifyTo
+
+    // Parameter defaults, also used directly on a job's very first build
+    // (before this properties() call has ever registered the parameters).
+    Map dflt = [
+        KERNEL_REPO: 'https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git',
+        KERNEL_REF:  'master',
+        FAMFS_REPO:  'file:///home/jenkins/git/famfs.git',
+        FAMFS_REFS:  'master',
+        LIBFUSE_REF: 'famfs.extmap',
+        RELEASE_CMAKE_BUILD_TYPE: 'RelWithDebInfo',
+    ]
+    List paramDefs = [
         string(name: 'KERNEL_REPO',
-               defaultValue: 'https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git',
+               defaultValue: dflt.KERNEL_REPO,
                description: 'Kernel git repo. Default: Linus\' tree (so KERNEL_REF=master is mainline). Use the stable tree https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git for vX.Y.Z tags, Miklos\' tree https://git.kernel.org/pub/scm/linux/kernel/git/mszeredi/fuse.git for a fuse-update-* tag.'),
         string(name: 'KERNEL_REF',
-               defaultValue: 'master',
+               defaultValue: dflt.KERNEL_REF,
                description: 'Kernel ref to test: tag (v7.4 / v7.4.2 / v7.5-rc1 / fuse-update-7.4), branch (master), or sha.'),
         string(name: 'FAMFS_REPO',
-               defaultValue: 'file:///home/jenkins/git/famfs.git',
+               defaultValue: dflt.FAMFS_REPO,
                description: 'famfs git repo (the thing1 mirror that smoke_local tests, or a url).'),
         string(name: 'FAMFS_REFS',
-               defaultValue: 'master',
+               defaultValue: dflt.FAMFS_REFS,
                description: 'Space-separated famfs refs to test in one boot: branches (master), release tags (v1.0), or shas.'),
         string(name: 'LIBFUSE_REF',
-               defaultValue: 'famfs.extmap',
+               defaultValue: dflt.LIBFUSE_REF,
                description: 'libfuse branch/tag/sha (github.com/jagalactic/libfuse) famfs is built against, pinned for this job (not chosen from the kernel). famfs.extmap until famfs lands in upstream libfuse; then master or a release tag.'),
+    ]
+    if (isRelease) {
+        paramDefs << string(name: 'RELEASE_CMAKE_BUILD_TYPE',
+               defaultValue: dflt.RELEASE_CMAKE_BUILD_TYPE,
+               description: 'CMAKE_BUILD_TYPE exported while the guest runs \'make release\' (cmake >= 3.22 uses it when the Makefile passes none). RelWithDebInfo = -O2 -g -DNDEBUG, Release = -O3 -DNDEBUG. EMPTY = build exactly what the famfs ref\'s own \'make release\' produces.')
+    }
+    properties([
+        disableConcurrentBuilds(),      // one run_qemu kernel build at a time per job; no multi-day pileups
+        parameters(paramDefs)
     ])
-])
+    String pKernelRepo = params.KERNEL_REPO ?: dflt.KERNEL_REPO
+    String pKernelRef  = params.KERNEL_REF  ?: dflt.KERNEL_REF
+    String pFamfsRepo  = params.FAMFS_REPO  ?: dflt.FAMFS_REPO
+    // '' is meaningful here (= no override), so only null falls back.
+    String cmakeBuildType = isRelease ?
+        (params.RELEASE_CMAKE_BUILD_TYPE != null ? params.RELEASE_CMAKE_BUILD_TYPE : dflt.RELEASE_CMAKE_BUILD_TYPE).trim() : ''
+    if (!(cmakeBuildType ==~ /[A-Za-z]*/)) { error("bad RELEASE_CMAKE_BUILD_TYPE '${cmakeBuildType}'") }
+    String buildDesc = isRelease ? "release (CMAKE_BUILD_TYPE=${cmakeBuildType ?: 'as the ref\'s make release sets it'})" : 'debug'
 
-node('run_qemu') {                                 // build/run_qemu agent on thing1
-    String notifyTo  = '@NOTIFY_EMAIL@'            // filled in from site.conf by scripts/create-job.sh
     String buildLink = "http://jenkins-server:8080/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/"
     // Defined before try{} so the finally{} attribution/email can see them.
-    List<String> famfsRefs = (params.FAMFS_REFS ?: '').trim().split(/\s+/).findAll { it }
+    List<String> famfsRefs = (params.FAMFS_REFS ?: dflt.FAMFS_REFS).trim().split(/\s+/).findAll { it }
     String treesDir = "${env.WORKSPACE}/famfs-trees"
-    String libfuseRef = (params.LIBFUSE_REF ?: 'famfs.extmap').trim()
+    String libfuseRef = (params.LIBFUSE_REF ?: dflt.LIBFUSE_REF).trim()
 
     try {
-        git url: 'git@github.com:jagalactic/famfs_jenkins.git'
         def fixture = load 'groovy/run_qemu_fixture.groovy'
         assert !famfsRefs.isEmpty() : 'FAMFS_REFS is empty'
 
-        currentBuild.displayName = "k:${params.KERNEL_REF} f:[${famfsRefs.join(' ')}]"
+        currentBuild.displayName = "k:${pKernelRef} f:[${famfsRefs.join(' ')}]"
 
         stage('fetch famfs x N') {
             // One clone per ref, then 'make all' ON THE HOST: that pulls every
@@ -66,12 +105,13 @@ node('run_qemu') {                                 // build/run_qemu agent on th
             // applies to the host's fresh clone) and the guest builds it as
             // is. debug/ (host cmake cache, host paths) is dropped so the
             // guest configures fresh; ndctl/build is excluded by run_qemu.
+            // .famfs-build-type tells the autorun which build to make and test.
             sh "rm -rf '${treesDir}'; mkdir -p '${treesDir}'"
             for (String ref : famfsRefs) {
                 sh """
                     set -eux
                     d='${treesDir}/${ref}'
-                    git clone '${params.FAMFS_REPO}' "\$d"
+                    git clone '${pFamfsRepo}' "\$d"
                     git -C "\$d" checkout '${ref}'
                     make -C "\$d" all
                     test -d "\$d/ndctl" && test -d "\$d/libfuse"
@@ -80,7 +120,8 @@ node('run_qemu') {                                 // build/run_qemu agent on th
                     git -C "\$d/libfuse" checkout -q --detach "refs/remotes/origin/${libfuseRef}" 2>/dev/null \\
                         || git -C "\$d/libfuse" checkout -q --detach '${libfuseRef}'
                     echo "${libfuseRef} \$(git -C "\$d/libfuse" rev-parse HEAD)" | tee "\$d/.libfuse-ref"
-                    rm -rf "\$d/debug" "\$d/coverage"
+                    echo '${buildType} ${cmakeBuildType}' > "\$d/.famfs-build-type"
+                    rm -rf "\$d/debug" "\$d/release" "\$d/coverage"
                     # mongoose ships tutorials with dangling symlinks that break
                     # run_qemu's (-L) rsync; prune all dangling symlinks.
                     find "\$d" -xtype l -delete 2>/dev/null || true
@@ -96,8 +137,9 @@ node('run_qemu') {                                 // build/run_qemu agent on th
             sh """
                 set -eu
                 {
-                    echo "kernel: ${params.KERNEL_REPO} @ ${params.KERNEL_REF}"
-                    echo "famfs_repo: ${params.FAMFS_REPO}"
+                    echo "kernel: ${pKernelRepo} @ ${pKernelRef}"
+                    echo "famfs_build: ${buildDesc}"
+                    echo "famfs_repo: ${pFamfsRepo}"
                     echo "libfuse: ${libfuseRef} \$(git -C '${treesDir}/${famfsRefs[0]}/libfuse' rev-parse HEAD)"
                     ${refLines}
                     echo "date: \$(date -u +%FT%TZ)"
@@ -111,8 +153,8 @@ node('run_qemu') {                                 // build/run_qemu agent on th
 
         fixture.call(
             // ---- kernel under test (arbitrary public ref) ----
-            kernelRepo:     params.KERNEL_REPO,
-            kernelRef:      params.KERNEL_REF,
+            kernelRepo:     pKernelRepo,
+            kernelRef:      pKernelRef,
             kernelMirror:   '/home/jenkins/git/linux-mirror.git',  // thing1-local bare mirror: hardlinked clone; KERNEL_REPO fallback
             kernelDir:      "${env.WORKSPACE}/linux-rq",   // persistent -> incremental builds
 
@@ -148,7 +190,7 @@ node('run_qemu') {                                 // build/run_qemu agent on th
         // Split the console into per-ref/per-phase logs and parse each ref's
         // verdict, so a multi-famfs run says exactly which famfs failed and how
         // much it matters.
-        boolean kernelIsTag = (params.KERNEL_REF ==~ /v\d+\.\d+(\.\d+)?(-rc\d+)?/)
+        boolean kernelIsTag = (pKernelRef ==~ /v\d+\.\d+(\.\d+)?(-rc\d+)?/)
         List<String> failedRelease = []   // released famfs (vX.Y*) fail on a tag kernel -> loud
         List<String> failedTip     = []   // master (or anything on a non-tag kernel) -> quiet
         String summary = famfsRefs.join(' ')
@@ -188,9 +230,9 @@ node('run_qemu') {                                 // build/run_qemu agent on th
                 parts << "${ref}:${verdict}"
             }
             summary = parts.join(' ')
-            currentBuild.displayName = "k:${params.KERNEL_REF} [${summary}]"
+            currentBuild.displayName = "k:${pKernelRef} [${summary}]"
             writeFile file: 'test-results.txt',
-                      text: "kernel: ${params.KERNEL_REF}\n" + parts.collect { "famfs ${it}" }.join('\n') + "\n"
+                      text: "kernel: ${pKernelRef}\n" + parts.collect { "famfs ${it}" }.join('\n') + "\n"
             archiveArtifacts artifacts: 'test-results.txt', allowEmptyArchive: true
         }
 
@@ -203,10 +245,11 @@ node('run_qemu') {                                 // build/run_qemu agent on th
         boolean loud  = kernelIsTag && (infra || !failedRelease.isEmpty())
         boolean quiet = !loud && (r == 'FAILURE' || r == 'UNSTABLE')
 
-        String body = """famfs_regression_public ${r}
+        String body = """${env.JOB_NAME} ${r}
 
-  kernel: ${params.KERNEL_REPO} @ ${params.KERNEL_REF}
-  famfs:  ${params.FAMFS_REPO}
+  kernel: ${pKernelRepo} @ ${pKernelRef}
+  famfs:  ${pFamfsRepo}
+  build:  ${buildDesc}
   per-ref: ${summary}
   ${failedRelease ? 'release-grade FAIL: ' + failedRelease.join(', ') + '\n  ' : ''}${failedTip ? 'tip-grade FAIL: ' + failedTip.join(', ') : ''}
   (UNSTABLE = a test failed, or NOSUPPORT = kernel has no famfs fuse ABI;
@@ -216,12 +259,14 @@ Console + per-ref artifacts: ${buildLink}console
 """
         if (loud) {
             mail to: notifyTo,
-                 subject: "[Jenkins] ${env.JOB_NAME} #${env.BUILD_NUMBER} ${r} - k:${params.KERNEL_REF} [${summary}]",
+                 subject: "[Jenkins] ${env.JOB_NAME} #${env.BUILD_NUMBER} ${r} - k:${pKernelRef} [${summary}]",
                  body: body
         } else if (quiet) {
             mail to: notifyTo,
-                 subject: "[Jenkins][tip] ${env.JOB_NAME} #${env.BUILD_NUMBER} ${r} - k:${params.KERNEL_REF} [${summary}]",
+                 subject: "[Jenkins][tip] ${env.JOB_NAME} #${env.BUILD_NUMBER} ${r} - k:${pKernelRef} [${summary}]",
                  body: body
         }
     }
 }
+
+return this

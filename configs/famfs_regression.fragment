@@ -1,6 +1,6 @@
 # famfs_regression.fragment
 #
-# CONFIG_* that famfs_regression_public needs on an ARBITRARY public kernel,
+# CONFIG_* that famfs_{dbg,rel}_regression_public need on an ARBITRARY public kernel,
 # merged by run_qemu_fixture's config-fragment path onto the run_qemu base
 # config (configs/famfs_qemu_ndctl.config). The base carries the run_qemu
 # boot/rootfs bits; this fragment forces the pieces the famfs fuse smoke needs
@@ -17,7 +17,7 @@
 #
 # The famfs-fork-only symbols at the bottom are harmless on a public kernel:
 # olddefconfig drops an unknown symbol silently. run_qemu_fixture asserts the
-# critical subset (assertConfig in famfs_regression_public.groovy) so a dropped
+# critical subset (assertConfig in groovy/famfs_regression.groovy) so a dropped
 # required symbol fails the build loudly instead of silently mis-testing.
 
 # --- memory / zone-device (backing for pmem/dax) ---

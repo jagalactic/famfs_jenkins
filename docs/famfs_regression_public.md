@@ -1,6 +1,14 @@
-# famfs_regression_public
+# famfs_dbg_regression_public / famfs_rel_regression_public
 
-The **famfs-against-public-kernels regression** job: build ONE public kernel,
+The **famfs-against-public-kernels regression** jobs. There are two, identical
+except for how famfs is built (see [Debug and release jobs](#debug-and-release-jobs)):
+
+| job | famfs build | smoke | unit tests |
+|-----|-------------|-------|------------|
+| `famfs_dbg_regression_public` | `make debug` (`-O0 -ggdb`) | `run_smoke.sh --fuse` | `ctest` in `debug/` |
+| `famfs_rel_regression_public` | `make release`, optimized, `NDEBUG` | `run_smoke.sh --fuse --release` | `ctest` in `release/` |
+
+Each one does this: build ONE public kernel,
 boot it under run_qemu with the emulated `nfit_test` backend, and build +
 smoke-test (`--fuse`) + unit-test **several famfs versions in that single
 boot**. It is the mashup of [ndctl_regression_public](ndctl_regression_public.md)
@@ -29,12 +37,13 @@ A kernel with no famfs fuse ABI at all (no `fuse_backing_is_dax` /
 scripts/famfs-regression-watch.sh   (thing1, daily timer 04:30)
         | polls upstream, picks the phase, dispatches buildWithParameters
         v
-famfs_regression_public  (the Jenkins job / worker, groovy/famfs_regression_public.groovy)
+famfs_dbg_regression_public, famfs_rel_regression_public
+        | (the Jenkins jobs / workers: thin entrypoints over groovy/famfs_regression.groovy)
         | node('run_qemu') on thing1 -> run_qemu_fixture
         v
 guest: scripts/autorun/rq-famfs-regression-autorun.sh
-        -> per famfs ref: libfuse branch switch (offline), make debug,
-           run_smoke.sh --fuse, ctest
+        -> per famfs ref: make debug | make release (as .famfs-build-type says),
+           run_smoke.sh --fuse [--release], ctest
 ```
 
 Each famfs ref is cloned on the host and **prepared with `make all`** there (the
@@ -54,11 +63,37 @@ fresh clone, and the host that prepares the tree has no famfs kernel. run_qemu
 copies guest trees **without `.git/`** (and without `build/`), so the host
 checks the pinned ref out in `./libfuse` before the copy, records it in
 `.libfuse-ref` (and the famfs sha in `.famfs-sha`), and drops `debug/`; the
-guest's `make debug` builds the checkout as is. A kernel/libfuse ABI mismatch
+guest's build uses the checkout as is. A kernel/libfuse ABI mismatch
 shows up as a smoke failure, which is the signal a pinned-branch job should
 give.
 
-### Worker parameters (`groovy/famfs_regression_public.groovy`)
+### Debug and release jobs
+
+Both jobs are thin entrypoints (`groovy/famfs_dbg_regression_public.groovy`,
+`groovy/famfs_rel_regression_public.groovy`) that call the shared worker
+`groovy/famfs_regression.groovy` with `buildType: 'debug'` or `'release'`. The
+worker records the choice in each prepared tree as `.famfs-build-type`, and the
+autorun builds and tests accordingly. Everything else (kernel, config, famfs
+refs, libfuse pin, attribution, mail) is the same code, and the watcher
+dispatches both with the same parameters, so a failure in only one of them is
+specific to that build type.
+
+**What "release" means.** famfs' `release` Makefile target runs cmake with no
+`CMAKE_BUILD_TYPE`, which gives an unoptimized build with asserts still
+enabled - little different from debug. The release job therefore exports
+`CMAKE_BUILD_TYPE` (job parameter `RELEASE_CMAKE_BUILD_TYPE`, default
+`RelWithDebInfo` = `-O2 -g -DNDEBUG`) while the guest runs `make release`;
+cmake (>= 3.22) uses the environment value as the default when the command line
+sets none. That is what exposes the bugs a debug build hides: asserts compiled
+out, optimizer-sensitive undefined behaviour, uninitialized variables. Set the
+parameter to `Release` for `-O3`, or empty to test exactly what the ref's own
+`make release` produces. The build section of the log prints the
+`CMAKE_BUILD_TYPE` and `C_FLAGS` actually used. If famfs' `release` target
+later sets a build type itself, that wins and the parameter becomes a no-op.
+
+Each job has its own workspace, so each keeps its own incremental kernel tree.
+
+### Worker parameters (`groovy/famfs_regression.groovy`)
 
 | param | default | meaning |
 |-------|---------|---------|
@@ -67,6 +102,7 @@ give.
 | `FAMFS_REPO`  | `file:///home/jenkins/git/famfs.git` | famfs repo (the thing1 mirror smoke_local tests) |
 | `FAMFS_REFS`  | `master` | **space-separated** famfs refs to test in one boot (branches, release tags `vX.Y`, or shas) |
 | `LIBFUSE_REF` | `famfs.extmap` | libfuse branch/tag/sha famfs is built against, pinned for the job (see below) |
+| `RELEASE_CMAKE_BUILD_TYPE` | `RelWithDebInfo` | release job only: `CMAKE_BUILD_TYPE` exported for `make release`; empty = no override |
 
 The kernel is **hardlink-cloned from the local mirror** (`kernelMirror=
 /home/jenkins/git/linux-mirror.git`); a ref the mirror lacks (Miklos' tag, or a
@@ -75,7 +111,7 @@ is the run_qemu base (`configs/famfs_qemu_ndctl.config`) + the nfit/dax/fuse
 fragment (`configs/famfs_regression.fragment`); `assertConfig` fails the build
 loudly if `make olddefconfig` drops `FUSE_FS`, `FUSE_PASSTHROUGH` (which carries
 `fs/fuse/ext_map.o` + `backing.o` in the 7.4 pull request) or the nfit/dax set.
-`disableConcurrentBuilds()` keeps one run_qemu kernel build at a time.
+`disableConcurrentBuilds()` keeps one run_qemu kernel build at a time per job.
 
 ### Per-ref results and weighted notification
 
@@ -125,11 +161,10 @@ build. Idempotent and non-interactive. Reads the Jenkins API token from
 ```
 kernel-mirror-update.timer    03:00  -> mirror refresh (ssh thing1)
 ndctl-regression-watch.timer  04:00  -> ndctl_regression_public
-famfs-regression-watch.timer  04:30  -> famfs_regression_public
+famfs-regression-watch.timer  04:30  -> famfs_dbg_regression_public + famfs_rel_regression_public
 ```
 
-Both regression workers run on the single `run_qemu` executor on thing1, so the
-later one queues behind the earlier one.
+All the regression workers run on thing1's `run_qemu` agent.
 
 ## Run it manually
 
@@ -140,28 +175,30 @@ CR=$(curl -sS -u "jmg:$T" "$J/crumbIssuer/api/json" | sed -n 's/.*"crumb":"\([^"
 curl -sS -X POST -u "jmg:$T" -H "Jenkins-Crumb:$CR" \
   --data-urlencode KERNEL_REPO=https://git.kernel.org/pub/scm/linux/kernel/git/mszeredi/fuse.git \
   --data-urlencode KERNEL_REF=fuse-update-7.4 --data-urlencode "FAMFS_REFS=master" \
-  "$J/job/famfs_regression_public/buildWithParameters"
+  "$J/job/famfs_dbg_regression_public/buildWithParameters"    # or famfs_rel_...
 
 # dry-run the watcher (no dispatch, no state change):
 scripts/famfs-regression-watch.sh -n
 ```
 
-> Note: re-registering the job (`create-job.sh`) writes empty `<properties/>`,
-> which **resets the Build-with-Parameters UI** until one build runs the
-> `properties([parameters...])` block. See [README.md](../README.md).
+> Note: the parameters are declared by the shared worker at run time, so a
+> **newly created** job has none until its first build has run; start that one
+> with a plain build (it uses the defaults: Linus' master x famfs master).
+> `create-job.sh` carries existing parameter definitions over on an update.
 
 ## Deploy
 
 1. Push this repo to gh (the worker loads the fixture, autorun, fragment and
    watcher from master at runtime).
-2. Register the job: `JOB=famfs_regression_public JENKINS_USER=jmg
-   scripts/create-job.sh` (`-n` first for the diff).
-3. Run it once by hand (Build with Parameters, Miklos' tag) to shake out the
-   config fragment / libfuse switch on the first real build.
+2. Register both jobs: `JOB=famfs_dbg_regression_public JENKINS_USER=jmg
+   scripts/create-job.sh`, then the same with `famfs_rel_regression_public`
+   (`-n` first for the diff).
+3. Run each once by hand (a plain build; it registers the parameters) to shake
+   out the config fragment / libfuse pin on the first real build.
 4. Install the timer: `sudo cp systemd/famfs-regression-watch.{service,timer}
    /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl
    enable --now famfs-regression-watch.timer`.
-5. Add `"famfs_regression_public": (48, False)` to `EXPECTED_JOBS` and
+5. Add `"famfs_dbg_regression_public": (48, False)` (and the `rel` one) to `EXPECTED_JOBS` and
    `famfs-regression-watch.timer` to `LOCAL_TIMERS` in `scripts/jenkins-watchdog`
    so a silent stop is reported (the watchdog runs from this checkout, so do
    this after steps 2 and 4 or it will complain daily until then).

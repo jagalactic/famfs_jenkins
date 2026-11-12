@@ -2,11 +2,11 @@
 # Poll the public kernel repo, Miklos' fuse tree and the famfs repo, pick the
 # phase (premerge: Miklos' fuse-update-7.4 tag / master: mainline after the
 # merge / tags: v7.4+ release, rc and stable tags), and dispatch the
-# famfs_regression_public Jenkins job. Idempotent: dedup state lives in
+# famfs_{dbg,rel}_regression_public Jenkins jobs. Idempotent: dedup state lives in
 # ~jmg/.famfs-regression-watch; the first run baselines the tag lists (no tag
 # flood) but still sends the nightly tip build, so it is safe to run on a
 # timer. Paired with famfs-regression-watch.timer; not enabled directly.
-Description=Watch kernel/famfs repos and dispatch famfs_regression_public
+Description=Watch kernel/famfs repos and dispatch famfs_{dbg,rel}_regression_public
 After=network-online.target
 Wants=network-online.target
 OnFailure=status-email@%n.service

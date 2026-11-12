@@ -75,7 +75,8 @@ EXPECTED_JOBS = {
     # dispatched by ndctl-regression-watch.timer on thing1, no Jenkins trigger
     "ndctl_regression_public": (48, False),
     # dispatched by famfs-regression-watch.timer on thing1, no Jenkins trigger
-    "famfs_regression_public": (48, False),
+    "famfs_dbg_regression_public": (48, False),
+    "famfs_rel_regression_public": (48, False),
 }
 # local (thing1) units that must be healthy
 LOCAL_SERVICES = ["jenkins-agent.service"]

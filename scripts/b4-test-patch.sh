@@ -5,7 +5,7 @@
 # Pulls one or more series from lore with b4, applies them on a base kernel
 # (the series' own base-commit when it has one, else Linus' current master),
 # publishes the result as a branch of a local bare repo that the run_qemu
-# workers can fetch, and dispatches famfs_regression_public (famfs over fuse
+# workers can fetch, and dispatches famfs_dbg_regression_public (famfs over fuse
 # on nfit devdax) and/or ndctl_regression_public (ndctl + dax unit tests) at
 # that branch. Jenkins shows the runs as "k:b4/<name> [...]".
 #
@@ -40,6 +40,9 @@
 #   MIRROR         local kernel mirror used as an object store (alternates)
 #   MAINLINE_REPO  Linus' tree (base for everything, fetched each run)
 #   JENKINS_URL, JENKINS_USER, FAMFS_REPO, NDCTL_REPO
+#   FAMFS_JOBS     famfs worker job(s) to dispatch, space-separated (default
+#                  famfs_dbg_regression_public; add famfs_rel_regression_public
+#                  to also test the release build of famfs)
 #
 # Exit: 0 dispatched (or dry-run ok); 1 usage; 2 setup/fetch error;
 #       3 the series does not apply; 4 a dispatch failed.
@@ -59,6 +62,7 @@ JENKINS_URL="${JENKINS_URL:-http://jenkins-server:8080}"
 JENKINS_USER="${JENKINS_USER:-jmg}"
 FAMFS_REPO="${FAMFS_REPO:-file:///home/jenkins/git/famfs.git}"
 NDCTL_REPO="${NDCTL_REPO:-https://github.com/pmem/ndctl.git}"
+FAMFS_JOBS="${FAMFS_JOBS:-famfs_dbg_regression_public}"
 
 DRY_RUN=0; JOBS="famfs,ndctl"; BASE=""; BASELINE=0; NAME=""
 FAMFS_REFS="master"; NDCTL_REFS="pending v85"; B4_ARGS=""
@@ -245,12 +249,16 @@ dispatch() {  # $1=job $2=kernel ref, then extra --data-urlencode args
 }
 KREFS=("$BRANCH"); (( BASELINE )) && KREFS+=("$BRANCH-base")
 for kref in "${KREFS[@]}"; do
-    (( RUN_FAMFS )) && dispatch famfs_regression_public "$kref" \
-        --data-urlencode "FAMFS_REPO=$FAMFS_REPO" --data-urlencode "FAMFS_REFS=$FAMFS_REFS"
+    if (( RUN_FAMFS )); then
+        for fjob in $FAMFS_JOBS; do
+            dispatch "$fjob" "$kref" \
+                --data-urlencode "FAMFS_REPO=$FAMFS_REPO" --data-urlencode "FAMFS_REFS=$FAMFS_REFS"
+        done
+    fi
     (( RUN_NDCTL )) && dispatch ndctl_regression_public "$kref" \
         --data-urlencode "NDCTL_REPO=$NDCTL_REPO" --data-urlencode "NDCTL_REFS=$NDCTL_REFS"
 done
 echo
-echo "watch:   $JENKINS_URL/job/famfs_regression_public/   $JENKINS_URL/job/ndctl_regression_public/"
+echo "watch:   $(for j in $FAMFS_JOBS; do printf '%s/job/%s/   ' "$JENKINS_URL" "$j"; done)$JENKINS_URL/job/ndctl_regression_public/"
 echo "         (display name k:$BRANCH [...]; both run on thing1's single run_qemu executor, in queue order)"
 (( FAILS == 0 )) || exit 4

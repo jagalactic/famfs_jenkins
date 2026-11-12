@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# famfs-regression-watch.sh - the WATCHER/dispatcher for famfs_regression_public.
+# famfs-regression-watch.sh - the WATCHER/dispatcher for the
+# famfs_{dbg,rel}_regression_public workers.
 #
 # Polls the public kernel repo and the famfs repo with `git ls-remote` (no
-# clone), notices new tags / tip movement, and triggers the
-# famfs_regression_public Jenkins job (Build with Parameters). Each kernel is
+# clone), notices new tags / tip movement, and triggers every Jenkins job in
+# JOBS (Build with Parameters): the debug-build and the release-build worker,
+# with identical parameters, so both build types see the same kernels. Each kernel is
 # tested (in ONE build) against a famfs SET = the master branch + the last
 # FAMFS_KEEP releases, so a build amortizes the kernel compile across several
 # famfs versions and the worker attributes per-ref.
@@ -56,7 +58,9 @@ KERNEL_REPO_BUILD="${KERNEL_REPO_BUILD:-$KERNEL_REPO}"
 
 JENKINS_URL="${JENKINS_URL:-http://jenkins-server:8080}"
 JENKINS_USER="${JENKINS_USER:-jmg}"
-JOB="${JOB:-famfs_regression_public}"
+# Workers to dispatch (space-separated); each gets the same parameters. JOB
+# (singular) is still honoured as a one-job override.
+JOBS="${JOBS:-${JOB:-famfs_dbg_regression_public famfs_rel_regression_public}}"
 STATE_DIR="${STATE_DIR:-$HOME/.famfs-regression-watch}"
 
 set -euo pipefail
@@ -137,15 +141,19 @@ jenkins_crumb() {
 }
 trigger() {  # $1=KERNEL_REPO  $2=KERNEL_REF  $3=FAMFS_REFS (space-separated famfs set)
     local krepo="$1" kref="$2" frefs="$3"
-    log "  dispatch: KERNEL=$krepo@$kref  FAMFS=$FAMFS_REPO@[$frefs]"
+    local job rc=0
+    log "  dispatch: KERNEL=$krepo@$kref  FAMFS=$FAMFS_REPO@[$frefs]  -> $JOBS"
     (( DRY_RUN )) && return 0
-    curl -fsS -X POST -u "$JENKINS_USER:$TOKEN" -H "$CFIELD:$CRUMB" \
-        --data-urlencode "KERNEL_REPO=$krepo" \
-        --data-urlencode "KERNEL_REF=$kref" \
-        --data-urlencode "FAMFS_REPO=$FAMFS_REPO" \
-        --data-urlencode "FAMFS_REFS=$frefs" \
-        "$JENKINS_URL/job/$JOB/buildWithParameters" -o /dev/null \
-        || { echo "    WARN: dispatch failed for $kref x [$frefs]" >&2; return 1; }
+    for job in $JOBS; do
+        curl -fsS -X POST -u "$JENKINS_USER:$TOKEN" -H "$CFIELD:$CRUMB" \
+            --data-urlencode "KERNEL_REPO=$krepo" \
+            --data-urlencode "KERNEL_REF=$kref" \
+            --data-urlencode "FAMFS_REPO=$FAMFS_REPO" \
+            --data-urlencode "FAMFS_REFS=$frefs" \
+            "$JENKINS_URL/job/$job/buildWithParameters" -o /dev/null \
+            || { echo "    WARN: dispatch to $job failed for $kref x [$frefs]" >&2; rc=1; }
+    done
+    return $rc
 }
 
 # ---- gather current state ----

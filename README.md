@@ -71,7 +71,7 @@ JENKINS_USER=jmg scripts/register-all-jobs.sh
 scripts/ndctl-regression-watch.sh -n               # dry-run
 # prune old builds so the controller disk doesn't fill
 scripts/cleanup-jenkins-builds.sh -n               # dry-run
-# test a lore patch/series (b4) through famfs_regression_public + ndctl_regression_public
+# test a lore patch/series (b4) through famfs_dbg_regression_public + ndctl_regression_public
 scripts/b4-test-patch.sh -n <msgid-or-lore-url>    # dry-run; see docs/b4-test-patch.md
 ```
 
@@ -104,11 +104,13 @@ the top of `ndctl-regression-watch.sh`. See
 watcher/worker flow and [docs/run_qemu_build_infra.md](docs/run_qemu_build_infra.md)
 for the kernel mirror, mkosi/buildDir layout, and package cache on thing1.
 
-`famfs_regression_public` is the same shape for **famfs against public
+`famfs_dbg_regression_public` and `famfs_rel_regression_public` (the debug and
+the release build of famfs; one shared implementation,
+`groovy/famfs_regression.groovy`) are the same shape for **famfs against public
 kernels**: `famfs-regression-watch.timer` (**04:30**) runs
 `scripts/famfs-regression-watch.sh`, which picks the kernel phase itself
 (Miklos' `fuse-update-7.4` tag until it is merged, then mainline master nightly,
-then every `v7.4+` tag) and dispatches the worker with a famfs set of `master`
+then every `v7.4+` tag) and dispatches both workers with a famfs set of `master`
 plus the last two releases once `FAMFS_MIN` is set. Install it the same way
 (`systemd/famfs-regression-watch.{service,timer}`); see
 [docs/famfs_regression_public.md](docs/famfs_regression_public.md).

@@ -3,7 +3,7 @@
 `scripts/b4-test-patch.sh` takes a patch or series from lore (by message-id
 or lore URL), applies it on a kernel base, publishes the result as a branch
 the run_qemu workers can fetch, and dispatches the existing
-[famfs_regression_public](famfs_regression_public.md) (famfs over fuse on an
+[famfs_dbg_regression_public](famfs_regression_public.md) (famfs over fuse on an
 nfit devdax) and/or [ndctl_regression_public](ndctl_regression_public.md)
 (ndctl + dax unit tests) jobs at that branch. No new Jenkins job: these are
 the nightly workers with `KERNEL_REPO`/`KERNEL_REF` pointed at the patched
@@ -35,7 +35,7 @@ b4 am <msgid>  ->  ~/.b4-test-patch/mbox/<run>/*.mbx
 /home/jenkins/git/linux-patches.git   refs/heads/b4/<name>      (+ b4/<name>-base with -B)
         |  buildWithParameters KERNEL_REPO=file://...linux-patches.git KERNEL_REF=b4/<name>
         v
-famfs_regression_public   k:b4/<name> [master:OK]
+famfs_dbg_regression_public   k:b4/<name> [master:OK]
 ndctl_regression_public   k:b4/<name> [pending:OK v85:OK]
 ```
 
